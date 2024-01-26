@@ -1,0 +1,25 @@
+requests
+python-dotenv
+ipython
+asyncio
+
+# Django
+django==3.2.8
+djangorestframework
+django-filter
+django-storages[s3]
+django-environ
+
+# Databases
+psycopg2-binary
+dj-database-url
+
+# Distributed tasks
+celery
+eventlet
+redis
+django-celery-beat
+
+# 3-rd party
+apify-client
+backoff
