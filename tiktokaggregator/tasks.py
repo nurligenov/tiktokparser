@@ -1,7 +1,9 @@
+import datetime
 import logging
 import threading
 from io import BytesIO
 from zipfile import ZipFile
+import gc
 
 import requests
 from celery import shared_task
@@ -51,7 +53,7 @@ def process_sound_tiktok_results(raw_items):
     return processed_items
 
 
-def process_sound_data(music_post_id, chunk_size=100):
+def process_sound_data(music_post_id, chunk_size=500):
     try:
         music_post = MusicPost.objects.get(id=music_post_id)
     except MusicPost.DoesNotExist:
@@ -65,6 +67,7 @@ def process_sound_data(music_post_id, chunk_size=100):
         "disableCheerioBoost": False,
         "disableEnrichAuthorStats": False,
         "musics": [music_post.music_url],
+        "resultsPerPage": 10000,
         "shouldDownloadCovers": False,
         "shouldDownloadSlideshowImages": False,
         "shouldDownloadVideos": False,
@@ -114,7 +117,7 @@ def process_tiktok_data(run_input):
     profile, _ = Profile.objects.get_or_create(url=run_input["profiles"][0])
 
     # Process items from the generator
-    for raw_items_chunk in chunked_generator(raw_items_generator, chunk_size=100):
+    for raw_items_chunk in chunked_generator(raw_items_generator, chunk_size=500):
         processed_items = process_tiktok_results(raw_items_chunk)
         save_posts_in_chunks(processed_items, profile)
     logger.info("Saved all posts sussesfully")
@@ -138,7 +141,7 @@ def process_tiktok_results(raw_items):
     return processed_items
 
 
-def save_posts_in_chunks(processed_items, profile, chunk_size=100, max_retries=3):
+def save_posts_in_chunks(processed_items, profile, chunk_size=500, max_retries=3):
     existing_music_urls = get_existing_music_urls()
 
     for i in range(0, len(processed_items), chunk_size):
@@ -235,7 +238,7 @@ def download_and_archive_videos(profile: Profile):
     in_memory_zip.seek(0)
 
     # Save the zip archive to the video_archive field of the MusicPost
-    archive_name = f"{profile.profile_name}.zip"
+    archive_name = f"{profile.profile_name}/{datetime.datetime.now().strftime('%Y-%m-%d-%H%M%S')}.zip"
     profile.video_archive.save(archive_name, ContentFile(in_memory_zip.getvalue()))
 
     # Close the BytesIO object
@@ -243,3 +246,4 @@ def download_and_archive_videos(profile: Profile):
 
     logger.info(f"Successfully archived videos for profile {profile}")
     video_posts.update(status=VideoPost.STATUS_UPLOADED)
+    gc.collect()
