@@ -19,14 +19,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-  pgbouncer:
-    image: edoburu/pgbouncer:1.18.0
-    env_file:
-      - ./.env
-    environment:
-      DATABASE_URL: "${POSTGRES_DATABASE_URL}"
-    depends_on:
-      - db
 
   redis:
     image: redis:alpine
@@ -45,7 +37,6 @@ services:
       - ./.env
     depends_on:
       - db
-      - pgbouncer
   celery:
     build:
       args:
