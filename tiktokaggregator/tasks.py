@@ -1,4 +1,5 @@
 import requests
+import threading
 from celery import shared_task
 from django.core.files.base import ContentFile
 from django.db.utils import IntegrityError
@@ -43,8 +44,37 @@ def process_sound_tiktok_results(raw_items):
     return processed_items
 
 
+def save_video_post(client: TikTokVideoDownloadClient, video_id, music_post):
+    print(f"Going to save video {video_id}")
+    try:
+        download_video_url = client.get_download_video_url(
+            video_id
+        )
+        response = requests.get(download_video_url, stream=True)
+        if response.status_code == 200:
+            video_file_name = (
+                f"{music_post.profile.split('/')[-1]}/{video_id}.mp4"
+            )
+
+            video_file = ContentFile(response.content)
+            video_post = VideoPost(
+                retrieved_from_post=music_post,
+            )
+            video_post.video.save(video_file_name, video_file, save=False)
+            video_post.save()
+            print(f"Successfully saved video {video_file_name}, profile: {music_post.profile}")
+            return True
+        else:
+            print(f"Response error,  url: download_video_url")
+    except IntegrityError:
+        print(f"IntegrityError during saving video {video_id}, profile: {music_post.profile}")
+    except Exception as e:
+        print(f"Error during saving video {video_id}, profile: {music_post.profile}, e: {e}")
+    return False
+
+
 @shared_task
-def process_sound_data(music_post_id, chunk_size=10):
+def process_sound_data(music_post_id, chunk_size=100):
     try:
         music_post = MusicPost.objects.get(id=music_post_id)
     except MusicPost.DoesNotExist:
@@ -65,13 +95,11 @@ def process_sound_data(music_post_id, chunk_size=10):
 
     sound_data_generator = client.run(run_input)
     existing_tiktok_ids = get_existing_tiktok_video_ids()
-    all_saved_successfully = True
 
     for raw_sound_data_chunk in chunked_generator(sound_data_generator, chunk_size):
         processed_chunk = process_sound_tiktok_results(raw_sound_data_chunk)
 
         video_download_client = TikTokVideoDownloadClient()
-        video_posts_to_create = []
         download_videos = video_download_client.run(
             {
                 "startUrls": [
@@ -84,35 +112,14 @@ def process_sound_data(music_post_id, chunk_size=10):
             item["video"].split(".mp4")[0] for item in download_videos
         ]
         filtered_video_ids = filter_video_posts(download_video_ids, existing_tiktok_ids)
+        threads = []
         for filtered_video_id in filtered_video_ids:
-            download_video_url = video_download_client.get_download_video_url(
-                filtered_video_id
-            )
-            response = requests.get(download_video_url, stream=True)
-            if response.status_code == 200:
-                video_file_name = (
-                    f"{music_post.profile.split('/')[-1]}/{filtered_video_id}.mp4"
-                )
-
-                video_file = ContentFile(response.content)
-                video_post = VideoPost(
-                    retrieved_from_post=music_post,
-                )
-                video_post.video.save(video_file_name, video_file, save=False)
-                video_posts_to_create.append(video_post)
-            else:
-                all_saved_successfully = False
-
-        try:
-            VideoPost.objects.bulk_create(video_posts_to_create, ignore_conflicts=True)
-        except IntegrityError:
-            all_saved_successfully = False
-            existing_tiktok_ids = get_existing_tiktok_video_ids()
-
-    if all_saved_successfully:
-        music_post.status = MusicPost.STATUS_FINISHED
-    else:
-        music_post.status = MusicPost.STATUS_FAILED
+            threads.append(threading.Thread(target=save_video_post, args=(video_download_client, filtered_video_id, music_post)))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    music_post.status = MusicPost.STATUS_FINISHED
     music_post.save()
 
 

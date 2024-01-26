@@ -51,7 +51,7 @@ services:
       args:
         env: ${ENVIRONMENT}
     container_name: tiktokparser_celery
-    command: celery -A tiktokparser worker --loglevel=INFO --pool=eventlet --concurrency=100
+    command: celery -A tiktokparser worker --loglevel=INFO --pool=eventlet --concurrency=20
     volumes:
       - .:/code
     env_file:
