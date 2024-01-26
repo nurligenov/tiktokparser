@@ -1,13 +1,18 @@
 import logging
 import threading
+from io import BytesIO
+from zipfile import ZipFile
+
+import requests
 from celery import shared_task
+from django.core.files.base import ContentFile
 from django.db.utils import IntegrityError
 
 from clients.apify import (TikTokScrapperClient, TikTokSoundScraperClient,
                            TikTokVideoDownloadClient)
+from tiktokparser.utils.helpers import ThreadWithReturnValue
 
-from .models import MusicPost, VideoPost
-
+from .models import MusicPost, Profile, VideoPost
 
 logger = logging.getLogger(__name__)
 
@@ -46,27 +51,6 @@ def process_sound_tiktok_results(raw_items):
     return processed_items
 
 
-def save_video_post(client: TikTokVideoDownloadClient, video_id, music_post):
-    download_video_url = client.get_download_video_url(
-        video_id
-    )
-    logger.info(f"Going to save video {download_video_url}")
-    try:
-        video_post = VideoPost(
-            retrieved_from_post=music_post,
-            download_video_id=video_id,
-            download_video_url=download_video_url,
-        )
-        video_post.save()
-        logger.info(f"Saved video {download_video_url}, profile: {music_post.profile}")
-    except IntegrityError:
-        logger.error(f"IntegrityError during saving video {download_video_url}, profile: {music_post.profile}")
-    except Exception as e:
-        logger.error(f"Error during saving video {download_video_url}, profile: {music_post.profile}, e: {e}")
-    return False
-
-
-@shared_task
 def process_sound_data(music_post_id, chunk_size=100):
     try:
         music_post = MusicPost.objects.get(id=music_post_id)
@@ -105,13 +89,19 @@ def process_sound_data(music_post_id, chunk_size=100):
             item["video"].split(".mp4")[0] for item in download_videos
         ]
         filtered_video_ids = filter_video_posts(download_video_ids, existing_tiktok_ids)
-        threads = []
-        for filtered_video_id in filtered_video_ids:
-            threads.append(threading.Thread(target=save_video_post, args=(video_download_client, filtered_video_id, music_post)))
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        video_posts = [
+            VideoPost(
+                retrieved_from_post=music_post,
+                download_video_id=filtered_video_id,
+                download_video_url=video_download_client.get_download_video_url(
+                    filtered_video_id
+                ),
+            )
+            for filtered_video_id in filtered_video_ids
+        ]
+
+        VideoPost.objects.bulk_create(video_posts, ignore_conflicts=True)
+        logger.info(f"{filtered_video_ids} is saved")
     music_post.status = MusicPost.STATUS_FINISHED
     music_post.save()
 
@@ -121,12 +111,16 @@ def process_tiktok_data(run_input):
     client = TikTokScrapperClient()
     raw_items_generator = client.run(run_input)
     logger.info(run_input)
-    profile = run_input["profiles"][0]
+    profile, _ = Profile.objects.get_or_create(url=run_input["profiles"][0])
 
     # Process items from the generator
     for raw_items_chunk in chunked_generator(raw_items_generator, chunk_size=100):
         processed_items = process_tiktok_results(raw_items_chunk)
         save_posts_in_chunks(processed_items, profile)
+    logger.info("Saved all posts sussesfully")
+    logger.info("Starting download_and_archive_videos")
+    download_and_archive_videos(profile)
+    logger.info("Finished download_and_archive_videos")
 
 
 def process_tiktok_results(raw_items):
@@ -161,13 +155,21 @@ def save_posts_in_chunks(processed_items, profile, chunk_size=100, max_retries=3
         while chunk and retry_count < max_retries:
             try:
                 created_posts = MusicPost.objects.bulk_create(
-                    [MusicPost(**item, profile=profile) for item in chunk],
+                    [MusicPost(**item, profile_url=profile) for item in chunk],
                     ignore_conflicts=True,
                 )
+                threads = []
+
                 for music_post in created_posts:
-                    process_sound_data.delay(
-                        music_post.id
-                    )  # Call the task for each created MusicPost
+                    threads.append(
+                        threading.Thread(
+                            target=process_sound_data, args=(music_post.id,)
+                        )
+                    )
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
                 break
             except IntegrityError:
                 retry_count += 1
@@ -185,3 +187,62 @@ def chunked_generator(generator, chunk_size):
             chunk = []
     if chunk:
         yield chunk
+
+
+def download_video(profile: Profile, video_post: VideoPost):
+    if not video_post.download_video_url:
+        logger.info(f"download_video_url is none or video is not None, {video_post.pk}")
+    logger.info(f"Starting download of the video, {video_post.download_video_url}")
+
+    response = requests.get(video_post.download_video_url, stream=True)
+
+    if response.status_code == 200:
+        logger.info(
+            f"Starting download of the video, response: 200, {video_post.download_video_url}"
+        )
+        video_file_name = f"{profile.profile_name}/{video_post.download_video_id}.mp4"
+
+        video_file = ContentFile(response.content)
+
+        logger.info(f"Successfully downloaded video {video_post.download_video_url}")
+        return video_file_name, video_file
+    else:
+        logger.error(f"Response error,  url: {video_post.download_video_url}")
+
+
+def download_and_archive_videos(profile: Profile):
+    logger.info(f"Started archiving videos for profile {profile}")
+    video_posts = VideoPost.objects.filter(
+        retrieved_from_post__profile_url=profile, status=VideoPost.STATUS_CREATED
+    )
+
+    # Create a BytesIO object to store the zip archive in memory
+    in_memory_zip = BytesIO()
+    threads = []
+    for video_post in video_posts:
+        thread = ThreadWithReturnValue(
+            target=download_video, args=(profile, video_post)
+        )
+        thread.start()
+        threads.append(thread)
+
+    with ZipFile(in_memory_zip, "w") as zipf:
+        for thread in threads:
+            result = thread.join()
+            if result:
+                video_file_name, video_file = result
+                # Add the video file to the ZIP file
+                zipf.writestr(video_file_name, video_file.read())
+
+    # Position the cursor at the start of the BytesIO object
+    in_memory_zip.seek(0)
+
+    # Save the zip archive to the video_archive field of the MusicPost
+    archive_name = f"{profile.profile_name}.zip"
+    profile.video_archive.save(archive_name, ContentFile(in_memory_zip.getvalue()))
+
+    # Close the BytesIO object
+    in_memory_zip.close()
+
+    logger.info(f"Successfully archived videos for profile {profile}")
+    video_posts.update(status=VideoPost.STATUS_UPLOADED)
