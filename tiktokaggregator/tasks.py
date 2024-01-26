@@ -118,9 +118,6 @@ def process_tiktok_data(run_input):
         processed_items = process_tiktok_results(raw_items_chunk)
         save_posts_in_chunks(processed_items, profile)
     logger.info("Saved all posts sussesfully")
-    logger.info("Starting download_and_archive_videos")
-    download_and_archive_videos(profile)
-    logger.info("Finished download_and_archive_videos")
 
 
 def process_tiktok_results(raw_items):
