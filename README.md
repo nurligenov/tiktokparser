@@ -26,11 +26,7 @@ https://docs.docker.com/desktop/install/mac-install/
 ### 1. Create .env file.
 ```bash
 DJANGO_DEBUG=True
-DATABASE_URL=postgres://postgres:postgres@pgbouncer:5432/postgres  # sqlite by default
-POSTGRES_DATABASE_URL=postgres://postgres:postgres@db:5432/postgres
-POOL_MODE=transaction
-MAX_DB_CONNECTIONS=250
-DEFAULT_POOL_SIZE=100
+DATABASE_URL=postgres://postgres:postgres@db:5432/postgres  # sqlite by default
 ENVIRONMENT=development
 DJANGO_AWS_STORAGE_BUCKET_NAME=
 DJANGO_AWS_ACCESS_KEY_ID=
