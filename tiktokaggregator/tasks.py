@@ -1,13 +1,15 @@
-import requests
+import logging
 import threading
 from celery import shared_task
-from django.core.files.base import ContentFile
 from django.db.utils import IntegrityError
 
 from clients.apify import (TikTokScrapperClient, TikTokSoundScraperClient,
                            TikTokVideoDownloadClient)
 
 from .models import MusicPost, VideoPost
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_existing_music_urls():
@@ -45,31 +47,22 @@ def process_sound_tiktok_results(raw_items):
 
 
 def save_video_post(client: TikTokVideoDownloadClient, video_id, music_post):
-    print(f"Going to save video {video_id}")
+    download_video_url = client.get_download_video_url(
+        video_id
+    )
+    logger.info(f"Going to save video {download_video_url}")
     try:
-        download_video_url = client.get_download_video_url(
-            video_id
+        video_post = VideoPost(
+            retrieved_from_post=music_post,
+            download_video_id=video_id,
+            download_video_url=download_video_url,
         )
-        response = requests.get(download_video_url, stream=True)
-        if response.status_code == 200:
-            video_file_name = (
-                f"{music_post.profile.split('/')[-1]}/{video_id}.mp4"
-            )
-
-            video_file = ContentFile(response.content)
-            video_post = VideoPost(
-                retrieved_from_post=music_post,
-            )
-            video_post.video.save(video_file_name, video_file, save=False)
-            video_post.save()
-            print(f"Successfully saved video {video_file_name}, profile: {music_post.profile}")
-            return True
-        else:
-            print(f"Response error,  url: download_video_url")
+        video_post.save()
+        logger.info(f"Saved video {download_video_url}, profile: {music_post.profile}")
     except IntegrityError:
-        print(f"IntegrityError during saving video {video_id}, profile: {music_post.profile}")
+        logger.error(f"IntegrityError during saving video {download_video_url}, profile: {music_post.profile}")
     except Exception as e:
-        print(f"Error during saving video {video_id}, profile: {music_post.profile}, e: {e}")
+        logger.error(f"Error during saving video {download_video_url}, profile: {music_post.profile}, e: {e}")
     return False
 
 
@@ -127,7 +120,7 @@ def process_sound_data(music_post_id, chunk_size=100):
 def process_tiktok_data(run_input):
     client = TikTokScrapperClient()
     raw_items_generator = client.run(run_input)
-    print(run_input)
+    logger.info(run_input)
     profile = run_input["profiles"][0]
 
     # Process items from the generator
@@ -158,8 +151,8 @@ def save_posts_in_chunks(processed_items, profile, chunk_size=100, max_retries=3
     existing_music_urls = get_existing_music_urls()
 
     for i in range(0, len(processed_items), chunk_size):
-        print("post")
-        print(processed_items[0])
+        logger.info("post")
+        logger.info(processed_items[0])
         chunk = filter_general_posts(
             processed_items[i : i + chunk_size], existing_music_urls
         )
